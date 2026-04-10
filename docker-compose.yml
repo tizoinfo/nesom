@@ -1,0 +1,115 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: nesom-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: nesom
+      MYSQL_USER: nesom_user
+      MYSQL_PASSWORD: nesom_password
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docs/05-数据库设计/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: nesom-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass redis_password
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis_password", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: nesom-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    command: server --console-address ":9001" /data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  backend:
+    build: ./backend
+    container_name: nesom-backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: mysql+aiomysql://nesom_user:nesom_password@mysql:3306/nesom
+      REDIS_URL: redis://:redis_password@redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_SECURE: "false"
+      ENVIRONMENT: development
+      SECRET_KEY: change-this-in-production
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:8080"]'
+      ALLOWED_HOSTS: '["localhost","127.0.0.1","*"]'
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: >
+      sh -c "python -m alembic upgrade head &&
+             uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  frontend:
+    build: ./frontend
+    container_name: nesom-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  worker:
+    build: ./backend
+    container_name: nesom-worker
+    command: celery -A src.worker.celery_app worker --loglevel=info -Q default,email,device_data,report
+    environment:
+      DATABASE_URL: mysql+aiomysql://nesom_user:nesom_password@mysql:3306/nesom
+      REDIS_URL: redis://:redis_password@redis:6379/0
+      ENVIRONMENT: development
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
